@@ -1,5 +1,9 @@
+import shutil
+import tempfile
 import urllib.parse
 
+from django.core.files.uploadedfile import SimpleUploadedFile
+from django.test import override_settings
 from django.urls import reverse
 from rest_framework import status
 from rest_framework.authtoken.models import Token
@@ -165,3 +169,48 @@ class BookmarksApiPermissionsTestCase(LinkdingApiTestCase, BookmarkFactoryMixin)
         url = reverse("linkding:bookmark-singlefile")
 
         self.post(url, expected_status_code=status.HTTP_401_UNAUTHORIZED)
+
+    def test_upload_preview_image_requires_authentication(self):
+        bookmark = self.setup_bookmark()
+        url = reverse("linkding:bookmark-upload-preview-image", args=[bookmark.id])
+
+        response = self.client.post(url, format="multipart")
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+        self.authenticate()
+        temp_dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, temp_dir)
+
+        with override_settings(LD_PREVIEW_FOLDER=temp_dir):
+            upload = SimpleUploadedFile(
+                "preview.png", b"preview", content_type="image/png"
+            )
+            response = self.client.post(
+                url,
+                {"file": upload},
+                format="multipart",
+            )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+
+    def test_upload_preview_image_only_updates_own_bookmarks(self):
+        self.authenticate()
+
+        other_user = self.setup_user()
+        bookmark = self.setup_bookmark(user=other_user)
+        url = reverse("linkding:bookmark-upload-preview-image", args=[bookmark.id])
+
+        temp_dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, temp_dir)
+
+        with override_settings(LD_PREVIEW_FOLDER=temp_dir):
+            upload = SimpleUploadedFile(
+                "preview.png", b"preview", content_type="image/png"
+            )
+            response = self.client.post(
+                url,
+                {"file": upload},
+                format="multipart",
+            )
+
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)

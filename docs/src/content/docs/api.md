@@ -212,6 +212,37 @@ DELETE /api/bookmarks/<id>/
 
 Deletes a bookmark by ID.
 
+**Upload preview image**
+
+```
+POST /api/bookmarks/<id>/preview-image/
+```
+
+Uploads a custom preview image for a bookmark. Send a `multipart/form-data`
+request with a `file` field that contains the image to upload. The file must
+use one of the supported preview image extensions and stay within the configured
+maximum size (see the `LD_PREVIEW_ALLOWED_EXTENSIONS` and
+`LD_PREVIEW_MAX_SIZE` settings).
+
+Example request using `curl`:
+
+```
+curl \
+  -X POST \
+  -H "Authorization: Token <Token>" \
+  -F "file=@/path/to/preview.png" \
+  http://127.0.0.1:8000/api/bookmarks/1/preview-image/
+```
+
+Example response:
+
+```json
+{
+  "message": "Preview image uploaded successfully.",
+  "preview_image_url": "http://127.0.0.1:8000/static/0ac5c53db923727765216a3a58e70522.png"
+}
+```
+
 ### Bookmark Assets
 
 **List**

@@ -1,11 +1,14 @@
+import hashlib
 import logging
 import mimetypes
 import os.path
-import hashlib
+import uuid
 from pathlib import Path
 
 import requests
 from django.conf import settings
+from django.core.files.uploadedfile import UploadedFile
+
 from bookmarks.services import website_loader
 
 logger = logging.getLogger(__name__)
@@ -21,6 +24,10 @@ def _url_to_filename(preview_image: str) -> str:
 
 def _get_image_path(preview_image_file: str) -> Path:
     return Path(os.path.join(settings.LD_PREVIEW_FOLDER, preview_image_file))
+
+
+class PreviewImageUploadError(Exception):
+    pass
 
 
 def load_preview_image(url: str) -> str | None:
@@ -84,5 +91,42 @@ def load_preview_image(url: str) -> str | None:
                 file.write(chunk)
 
     logger.debug(f"Saved preview image as: {preview_image_path}")
+
+    return preview_image_file
+
+
+def save_uploaded_preview_image(uploaded_file: UploadedFile) -> str:
+    _ensure_preview_folder()
+
+    file_extension = Path(uploaded_file.name).suffix.lower()
+    if not file_extension or file_extension not in settings.LD_PREVIEW_ALLOWED_EXTENSIONS:
+        raise PreviewImageUploadError("Unsupported file type.")
+
+    file_size = getattr(uploaded_file, "size", None)
+    if file_size and file_size > settings.LD_PREVIEW_MAX_SIZE:
+        raise PreviewImageUploadError("File exceeds maximum size.")
+
+    preview_image_file = f"{uuid.uuid4().hex}{file_extension}"
+    preview_image_path = _get_image_path(preview_image_file)
+
+    bytes_written = 0
+
+    try:
+        with open(preview_image_path, "wb") as file:
+            for chunk in uploaded_file.chunks():
+                bytes_written += len(chunk)
+                if bytes_written > settings.LD_PREVIEW_MAX_SIZE:
+                    raise PreviewImageUploadError("File exceeds maximum size.")
+                file.write(chunk)
+    except PreviewImageUploadError:
+        if preview_image_path.exists():
+            preview_image_path.unlink()
+        raise
+    except Exception:
+        if preview_image_path.exists():
+            preview_image_path.unlink()
+        raise
+
+    logger.debug(f"Saved uploaded preview image as: {preview_image_path}")
 
     return preview_image_file
