@@ -1,10 +1,14 @@
 import datetime
 import io
+import os
+import shutil
+import tempfile
 import urllib.parse
 from collections import OrderedDict
 from unittest.mock import patch, ANY
 
 from django.contrib.auth.models import User
+from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import override_settings
 from django.urls import reverse
 from django.utils import timezone
@@ -443,6 +447,54 @@ class BookmarksApiTestCase(LinkdingApiTestCase, BookmarkFactoryMixin):
         self.assertEqual(bookmark.tags.count(), 2)
         self.assertEqual(bookmark.tags.filter(name=data["tag_names"][0]).count(), 1)
         self.assertEqual(bookmark.tags.filter(name=data["tag_names"][1]).count(), 1)
+
+    def test_create_bookmark_with_preview_image(self):
+        self.authenticate()
+
+        temp_dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, temp_dir)
+
+        upload = SimpleUploadedFile("preview.png", b"test-image", content_type="image/png")
+
+        with override_settings(LD_PREVIEW_FOLDER=temp_dir):
+            response = self.client.post(
+                reverse("linkding:bookmark-list"),
+                {"url": "https://example.com/", "preview_image": upload},
+                format="multipart",
+            )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+
+        bookmark = Bookmark.objects.get(url="https://example.com/")
+        self.assertTrue(bookmark.preview_image_file.endswith(".png"))
+
+        preview_path = os.path.join(temp_dir, bookmark.preview_image_file)
+        self.assertTrue(os.path.exists(preview_path))
+        self.assertEqual(
+            response.data["preview_image_url"],
+            f"http://testserver/static/{bookmark.preview_image_file}",
+        )
+
+    def test_create_bookmark_rejects_invalid_preview_image(self):
+        self.authenticate()
+
+        temp_dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, temp_dir)
+
+        upload = SimpleUploadedFile(
+            "preview.txt", b"not-an-image", content_type="text/plain"
+        )
+
+        with override_settings(LD_PREVIEW_FOLDER=temp_dir):
+            response = self.client.post(
+                reverse("linkding:bookmark-list"),
+                {"url": "https://example.com/", "preview_image": upload},
+                format="multipart",
+            )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response.data["preview_image"], ["Unsupported file type."])
+        self.assertFalse(Bookmark.objects.filter(url="https://example.com/").exists())
 
     def test_create_bookmark_enhances_with_metadata_by_default(self):
         self.authenticate()
@@ -1268,6 +1320,121 @@ class BookmarksApiTestCase(LinkdingApiTestCase, BookmarkFactoryMixin):
         response = self.get(url, expected_status_code=status.HTTP_200_OK)
 
         self.assertUserProfile(response, profile)
+
+    def test_upload_preview_image(self):
+        self.authenticate()
+        bookmark = self.setup_bookmark()
+        temp_dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, temp_dir)
+
+        with override_settings(LD_PREVIEW_FOLDER=temp_dir):
+            upload = SimpleUploadedFile(
+                "preview.png", b"test-image", content_type="image/png"
+            )
+            response = self.client.post(
+                reverse("linkding:bookmark-upload-preview-image", args=[bookmark.id]),
+                {"file": upload},
+                format="multipart",
+            )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(
+            response.data["message"], "Preview image uploaded successfully."
+        )
+
+        bookmark.refresh_from_db()
+        self.assertTrue(bookmark.preview_image_file.endswith(".png"))
+
+        preview_path = os.path.join(temp_dir, bookmark.preview_image_file)
+        self.assertTrue(os.path.exists(preview_path))
+        self.assertEqual(
+            response.data["preview_image_url"],
+            f"http://testserver/static/{bookmark.preview_image_file}",
+        )
+
+    def test_upload_preview_image_replaces_previous_file(self):
+        self.authenticate()
+        bookmark = self.setup_bookmark()
+        temp_dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, temp_dir)
+
+        with override_settings(LD_PREVIEW_FOLDER=temp_dir):
+            bookmark.preview_image_file = "existing.png"
+            bookmark.save(update_fields=["preview_image_file"])
+            old_path = os.path.join(temp_dir, "existing.png")
+            with open(old_path, "wb") as file:
+                file.write(b"old")
+
+            upload = SimpleUploadedFile(
+                "preview.jpg", b"new-image", content_type="image/jpeg"
+            )
+            response = self.client.post(
+                reverse("linkding:bookmark-upload-preview-image", args=[bookmark.id]),
+                {"file": upload},
+                format="multipart",
+            )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+
+        bookmark.refresh_from_db()
+        new_path = os.path.join(temp_dir, bookmark.preview_image_file)
+        self.assertTrue(os.path.exists(new_path))
+        self.assertFalse(os.path.exists(old_path))
+
+    def test_upload_preview_image_requires_file(self):
+        self.authenticate()
+        bookmark = self.setup_bookmark()
+        temp_dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, temp_dir)
+
+        with override_settings(LD_PREVIEW_FOLDER=temp_dir):
+            response = self.client.post(
+                reverse("linkding:bookmark-upload-preview-image", args=[bookmark.id]),
+                {},
+                format="multipart",
+            )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response.data["error"], "No file provided.")
+
+    def test_upload_preview_image_rejects_large_files(self):
+        self.authenticate()
+        bookmark = self.setup_bookmark()
+        temp_dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, temp_dir)
+
+        with override_settings(LD_PREVIEW_FOLDER=temp_dir, LD_PREVIEW_MAX_SIZE=5):
+            upload = SimpleUploadedFile(
+                "preview.png", b"123456", content_type="image/png"
+            )
+            response = self.client.post(
+                reverse("linkding:bookmark-upload-preview-image", args=[bookmark.id]),
+                {"file": upload},
+                format="multipart",
+            )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response.data["error"], "File exceeds maximum size.")
+        self.assertEqual(os.listdir(temp_dir), [])
+
+    def test_upload_preview_image_rejects_invalid_file_type(self):
+        self.authenticate()
+        bookmark = self.setup_bookmark()
+        temp_dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, temp_dir)
+
+        with override_settings(LD_PREVIEW_FOLDER=temp_dir):
+            upload = SimpleUploadedFile(
+                "preview.txt", b"not-an-image", content_type="text/plain"
+            )
+            response = self.client.post(
+                reverse("linkding:bookmark-upload-preview-image", args=[bookmark.id]),
+                {"file": upload},
+                format="multipart",
+            )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response.data["error"], "Unsupported file type.")
 
     def create_singlefile_upload_body(self):
         url = "https://example.com"

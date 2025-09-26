@@ -26,7 +26,14 @@ from bookmarks.models import (
     User,
     BookmarkBundle,
 )
-from bookmarks.services import assets, bookmarks, bundles, auto_tagging, website_loader
+from bookmarks.services import (
+    assets,
+    bookmarks,
+    bundles,
+    auto_tagging,
+    preview_image_loader,
+    website_loader,
+)
 from bookmarks.utils import normalize_url
 from bookmarks.type_defs import HttpRequest
 from bookmarks.views import access
@@ -103,6 +110,148 @@ class BookmarkViewSet(
         bookmark = self.get_object()
         bookmarks.unarchive_bookmark(bookmark)
         return Response(status=status.HTTP_204_NO_CONTENT)
+
+    def create(self, request: HttpRequest, *args, **kwargs):
+        preview_upload = request.FILES.get("preview_image")
+
+        try:
+            request_data = request.data.copy()
+        except AttributeError:
+            request_data = dict(request.data)
+
+        request_data.pop("preview_image", None)
+
+        serializer = self.get_serializer(data=request_data)
+        serializer.is_valid(raise_exception=True)
+
+        new_preview_image_file = None
+
+        if preview_upload:
+            try:
+                new_preview_image_file = (
+                    preview_image_loader.save_uploaded_preview_image(preview_upload)
+                )
+            except preview_image_loader.PreviewImageUploadError as error:
+                return Response(
+                    {"preview_image": [str(error)]},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            except Exception as error:
+                logger.error(
+                    "Failed to upload preview image during bookmark creation.",
+                    exc_info=error,
+                )
+                return Response(
+                    {"preview_image": ["Failed to upload preview image."]},
+                    status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                )
+
+        try:
+            bookmark = serializer.save()
+        except Exception:
+            if new_preview_image_file:
+                self._delete_preview_image_file(new_preview_image_file)
+            raise
+
+        if new_preview_image_file:
+            try:
+                bookmark.preview_image_file = new_preview_image_file
+                bookmark.save(update_fields=["preview_image_file"])
+            except Exception as error:
+                self._delete_preview_image_file(new_preview_image_file)
+                logger.error(
+                    "Failed to save preview image for new bookmark. bookmark_id=%s",
+                    bookmark.id,
+                    exc_info=error,
+                )
+                raise
+
+        response_serializer = self.get_serializer(bookmark)
+        headers = self.get_success_headers(response_serializer.data)
+        return Response(
+            response_serializer.data,
+            status=status.HTTP_201_CREATED,
+            headers=headers,
+        )
+
+    def _delete_preview_image_file(self, preview_image_file: str):
+        preview_image_path = os.path.join(settings.LD_PREVIEW_FOLDER, preview_image_file)
+
+        if not os.path.exists(preview_image_path):
+            return
+
+        try:
+            os.remove(preview_image_path)
+        except Exception as error:
+            logger.error(
+                "Failed to delete preview image file. file=%s",
+                preview_image_file,
+                exc_info=error,
+            )
+
+    @action(methods=["post"], detail=True, url_path="preview-image")
+    def upload_preview_image(self, request: HttpRequest, pk):
+        bookmark = self.get_object()
+
+        upload_file = request.FILES.get("file")
+        if not upload_file:
+            return Response(
+                {"error": "No file provided."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            new_preview_image_file = preview_image_loader.save_uploaded_preview_image(
+                upload_file
+            )
+        except preview_image_loader.PreviewImageUploadError as error:
+            return Response(
+                {"error": str(error)},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        except Exception as error:
+            logger.error(
+                "Failed to upload preview image. bookmark_id=%s",
+                bookmark.id,
+                exc_info=error,
+            )
+            return Response(
+                {"error": "Failed to upload preview image."},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+        old_preview_image_file = bookmark.preview_image_file
+        bookmark.preview_image_file = new_preview_image_file
+        bookmark.save(update_fields=["preview_image_file"])
+
+        if (
+            old_preview_image_file
+            and old_preview_image_file != new_preview_image_file
+        ):
+            old_preview_image_path = os.path.join(
+                settings.LD_PREVIEW_FOLDER, old_preview_image_file
+            )
+            try:
+                if os.path.exists(old_preview_image_path):
+                    os.remove(old_preview_image_path)
+            except Exception as error:
+                logger.error(
+                    "Failed to delete previous preview image. bookmark_id=%s file=%s",
+                    bookmark.id,
+                    old_preview_image_file,
+                    exc_info=error,
+                )
+
+        serializer = self.get_serializer(bookmark)
+        preview_image_url = serializer.data.get("preview_image_url")
+
+        return Response(
+            {
+                "message": "Preview image uploaded successfully.",
+                "preview_image_url": preview_image_url,
+            },
+            status=status.HTTP_201_CREATED,
+        )
 
     @action(methods=["get"], detail=False)
     def check(self, request: HttpRequest):

@@ -141,6 +141,12 @@ the future to return an error instead.
 If the title and description are not provided or empty, the application automatically tries to scrape them from the
 bookmarked website. This behavior can be disabled by adding the `disable_scraping` query parameter to the API request.
 
+To upload a custom preview image during creation, send the request as
+`multipart/form-data` and include a `preview_image` file field alongside the other
+bookmark attributes. The uploaded file must use one of the supported preview
+image extensions and stay within the configured maximum size (see the
+`LD_PREVIEW_ALLOWED_EXTENSIONS` and `LD_PREVIEW_MAX_SIZE` settings).
+
 Example payload:
 
 ```json
@@ -157,6 +163,17 @@ Example payload:
     "tag2"
   ]
 }
+```
+
+Example request with a preview image using `curl`:
+
+```
+curl \
+  -X POST \
+  -H "Authorization: Token <Token>" \
+  -F "url=https://example.com" \
+  -F "preview_image=@/path/to/preview.png" \
+  http://127.0.0.1:8000/api/bookmarks/
 ```
 
 **Update**
@@ -211,6 +228,37 @@ DELETE /api/bookmarks/<id>/
 ```
 
 Deletes a bookmark by ID.
+
+**Upload preview image**
+
+```
+POST /api/bookmarks/<id>/preview-image/
+```
+
+Uploads a custom preview image for a bookmark. Send a `multipart/form-data`
+request with a `file` field that contains the image to upload. The file must
+use one of the supported preview image extensions and stay within the configured
+maximum size (see the `LD_PREVIEW_ALLOWED_EXTENSIONS` and
+`LD_PREVIEW_MAX_SIZE` settings).
+
+Example request using `curl`:
+
+```
+curl \
+  -X POST \
+  -H "Authorization: Token <Token>" \
+  -F "file=@/path/to/preview.png" \
+  http://127.0.0.1:8000/api/bookmarks/1/preview-image/
+```
+
+Example response:
+
+```json
+{
+  "message": "Preview image uploaded successfully.",
+  "preview_image_url": "http://127.0.0.1:8000/static/0ac5c53db923727765216a3a58e70522.png"
+}
+```
 
 ### Bookmark Assets
 
